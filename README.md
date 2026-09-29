@@ -248,20 +248,84 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 Get-ChildItem .\scripts\*.ps1 | Unblock-File
 ```
 
+### 🔴 `Write-Host 'a' + $var` 會**靜默吞掉** `$var`
+
+這題目在 PowerShell 裡超級常見，而且不會丟錯，只會少印東西：
+
+```powershell
+function W($m) { Write-Host $m }
+$n = 5
+
+W '  RESULT: ' + $n + ' CHECKS FAILED'   # 輸出只有：  RESULT:
+W ('  RESULT: ' + $n + ' CHECKS FAILED')  # 輸出：      RESULT: 5 CHECKS FAILED  ✓
+```
+
+原因：命令引數的解析模式遇到運算子就停。`W '  RESULT: ' + $n + ' ...'`
+會被拆成「呼叫 `W`，引數是 `'  RESULT: '`」，後面的 `+ $n + ' ...'`
+變成另一段獨立敘述被丟棄。**只要有變數相加，務必加括號或改用 `-f`：**
+
+```powershell
+W ('  RESULT: ' + $n + ' CHECKS FAILED')
+W ('  {0,-44} {1}' -f $f, $present)      # -f 最安全
+```
+
+### 🔴 驗證腳本不要把「沒檢查到」當成「通過」
+
+第一版的 `03-verify.ps1` 有三個假通過，都是同一個病根 —— 預設值刚好等於通過條件：
+
+```powershell
+# 掛載失敗時 action 根本沒執行，$efiOk 停在初始值 $true
+$efiOk = $true
+With-MountedPartition ... { $efiOk = $false }   # 掛不上就不會跑
+Assert-True $efiOk                              # → 假 PASS
+
+# bcdedit 失敗時兩個變數都是 $null，$null -eq $null 為 true
+Assert-True ($currentId -eq $winreObj)           # → 假 PASS
+```
+
+所以腳本改成**三態**（PASS / FAIL / SKIP），且：
+
+- 每個跳過的項目都記在 `skipped` 計數裡，結束代碼 `2` 表示「報告不完整」
+- 比較兩個變數前先確認兩者都非 null
+- 讀不掉的檔案用 `try/catch` 分成 yes / no / denied 三種，不用 `Test-Path` 的
+  布爾結果（權限不足時 `Test-Path` 會丟出非終止錯誤，指令還會**繼續往下跑**並印出
+  「does not exist (good)」這種完全相反的結論）
+
 ---
 
 ## 驗收清單
 
-最快的做法是跑驗證腳本（**唯讀**，會產出 `verify-report.txt` 並列出每項檢查的 PASS/FAIL）：
+最快的做法是跑驗證腳本（**唯讀**，會產出 `verify-report.txt` 並列出每項檢查的狀態）：
 
 ```powershell
-.\scripts\03-verify.ps1
+# 必須在「系統管理員」PowerShell 執行
+powershell -ExecutionPolicy Bypass -File .\scripts\03-verify.ps1
 ```
 
 它會檢查：分割表（EFI / MSR / C: / 復原分割的 GPT type）、D: 是否消失、
 `reagentc /info`、BCD 的 `recoveryenabled` 與 `recoverysequence`、WinRE 物件的
-`ramdisk` 是否解析到真實磁碟區、EFI 開機檔是否存在、wim 映像完整性，
+`ramdisk` 是否解析到真實磁碟區、有沒有孤兒 `[unknown]` BCD 物件、EFI 開機檔是否存在、
+wim 映像完整性（並比對**展開後**大小 vs 復原分割容量）、
 以及是否還有殘留的 `C:\Recovery\WindowsRE` 或指向 `D:` 的登錄檔／環境變數。
+
+**每項檢查是三態的**，這點很重要 —— 檢查「做不成」不等於「檢查失敗」：
+
+| 狀態 | 意義 | 計入 |
+|---|---|---|
+| `PASS` | 條件成立 | pass |
+| `FAIL` | 條件不成立 | **fail** |
+| `SKIP` | 無法評估（沒權限、工具不存在、路徑被擋） | 報告為略過，**不算 pass** |
+
+結束代碼：`0` = 全過、`1` = 有失敗、`2` = 沒失敗但有略過。
+拿 `2` 當成功是錯的 —— 它代表報告不完整。
+
+腳本預設**拒絕在非管理員 shell 執行**（因為 `reagentc` / `bcdedit` / DISM /
+`Add-PartitionAccessPath` 全部需要系統管理員權限，硬跑只會產生一整頁假的失敗）。
+只想先看分割表可以加：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\03-verify.ps1 -AllowNotElevated
+```
 
 要手動查的話：
 
