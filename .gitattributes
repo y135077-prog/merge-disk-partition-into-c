@@ -1,0 +1,16 @@
+# Normalise line endings on commit, check out with LF everywhere.
+# Keeps the .ps1 files byte-identical between Windows and Linux checkouts,
+# which matters because Windows PowerShell 5.1 is picky about script contents.
+* text=auto eol=lf
+
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+*.md  text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+LICENSE text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf

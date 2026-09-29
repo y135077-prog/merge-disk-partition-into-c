@@ -1,0 +1,238 @@
+# 將第二個資料碟（D:）合併回系統碟（C:）
+
+> 在 GPT 磁碟上，把空的副分割併入 C:，同時保留／重建 Windows 修復環境（WinRE）。
+> 全部使用 Windows 內建工具（PowerShell + `reagentc`），不需要 Partition Magic / DiskGenius 類第三方軟體。
+
+實測結果：單顆 512 GB NVMe，C: 從 **237 GB → 474.8 GB**，D: 消失，WinRE 完整復原。
+
+---
+
+## 為什麼不能直接用 diskpart？
+
+因為 C: 和 D: **中間夾著 1 GB 的復原分割**：
+
+```
+初始（GPT）
+┌──────────┬─────┬──────────────┬──────────┬──────────────┐
+│ EFI 100M │ MSR │   C: 237 GB  │ Recovery │    D: 238 GB │
+│          │ 16M │              │   1 GB   │              │
+└──────────┴─────┴──────────────┴──────────┴──────────────┘
+                 ^^^^^^^^^^^^^^  ^^^^^^^^^^  ^^^^^^^^^^^^^^
+                 C:              WinRE      ← 目標：消掉
+```
+
+`diskpart` 的 `extend` 只能吃**緊鄰**的未配置空間，不能跨過中間的分割，也無法搬移分割。
+所以流程必須是：**先備份 WinRE → 停用 → 刪除後面兩塊 → 往前擴充 C: →（選用）重建復原分割**。
+
+---
+
+## 前置條件（動手前必讀）
+
+| 條件 | 說明 |
+|---|---|
+| 系統管理員權限 | 所有步驟都需要。本機的 C 槽根目錄也只有管理員能寫 |
+| D: 必須是空的 | 腳本會檢查；非空直接中止 |
+| 無 BitLocker | 有 BitLocker 時修改分割需先暫停保護 |
+| C: 有足夠空間 | 需能容納 WinRE 映像（本例 943 MB），建議 > 3 GB |
+| 無 BitLocker 修復代理 | 復原分割若被 OEM 工具引用，刪除後該工具可能失效 |
+
+---
+
+## 快速開始
+
+```powershell
+# 1. 以系統管理員身分開啟 PowerShell
+# 2. 合併（備份 WinRE → 刪 D: 和復原分割 → 擴充 C:）
+.\scripts\01-merge-partition-into-c.ps1
+
+# 3.（選用）重建復原分割，並把 WinRE 移回去
+.\scripts\02-rebuild-winre.ps1
+```
+
+兩個腳本都會把完整過程寫進日誌，並在**每個危險步驟前先驗證**；失敗時會停在安全的狀態，
+不會讓系統處於「WinRE 壞掉 + 分割已刪」的中間點。
+
+---
+
+## 完整流程
+
+### Step 1 — 手動備份 WinRE
+
+> ⚠️ **坑 #1：不是每台機器都有 `reagentc /backup`**
+> 部分 Windows 版本（精簡版 / Server / LTSC 分支）的 `reagentc.exe` 沒有 `/backup` 參數，
+> 跑下去只會印出用法說明。判斷方式：
+> ```powershell
+> reagentc /backup /output C:\WinREBackup
+> # 印出一堆 usage = 你的版本不支援，改用手動備份
+> ```
+
+手動備份：掛載復原分割 → 複製 `\Recovery\WindowsRE` → 取消掛載。
+
+```powershell
+Add-PartitionAccessPath -DiskNumber 0 -PartitionNumber 4 -AccessPath "R:\"
+Copy-Item "R:\Recovery\WindowsRE" C:\WinREBackup -Recurse -Force
+Remove-PartitionAccessPath -DiskNumber 0 -PartitionNumber 4 -AccessPath "R:\"
+```
+
+> ⚠️ **坑 #2：檔名大小寫**
+> 復原分割上的檔名是全小寫 `winre.wim`。若你的磁碟區開了大小寫敏感
+> （ReFS、或部分虛擬磁碟），`Test-Path "C:\WinREBackup\WinRE.wim"` 會回傳 `False`
+> —— 明明檔案就在那。**驗證時務必用實際檔名大小寫**，或改用 `Get-ChildItem` 比對。
+
+### Step 2 — 停用 WinRE
+
+```powershell
+reagentc /disable
+```
+
+停用後 `C:\Windows\System32\Recovery\ReAgent.xml` 的 `InstallState` 會變成 `0`，
+`WinreLocation` 會被清空 —— 這就是「已成功停用」的判斷依據。
+
+### Step 3 — 刪除 D: 與復原分割
+
+```powershell
+Get-Partition -DiskNumber 0 -PartitionNumber 5 | Remove-Partition   # D:
+Get-Partition -DiskNumber 0 -PartitionNumber 4 | Remove-Partition   # WinRE
+```
+
+### Step 4 — 擴充 C: 到最大
+
+```powershell
+$max = (Get-PartitionSupportedSize -DiskNumber 0 -PartitionNumber 3).SizeMax
+Get-Partition -DiskNumber 0 -PartitionNumber 3 | Resize-Partition -Size $max
+```
+
+### Step 5 —（選用）重建復原分割
+
+想保留「OS 分割壞掉時還有救援環境」這層保險，就重建一塊 2 GB 的分割。
+不重建的話，C: 可以拿回全部容量（多 2 GB），WinRE 改放 `C:\Recovery\WindowsRE` 一樣能運作。
+
+---
+
+## 坑大全
+
+### 🔴 `New-Partition` 沒有 `-NoDefaultDriveLetter`
+
+```powershell
+New-Partition -DiskNumber 0 -Size 2GB -NoDefaultDriveLetter   # ✗ 參數不存在
+New-Partition -DiskNumber 0 -Size 2GB -AssignDriveLetter:$false   # ✓
+```
+
+### 🔴 剛好差 1 MB 的「Not enough available capacity」
+
+GPT 會在磁碟最後保留 1 MB 給次要分割表。所以「切出剛好 2 GB」會失敗：
+
+```
+可用 2049 MB，要求 2048 MB  →  New-Partition: Not enough available capacity
+```
+
+**解法：多留 32 MB 餘裕。** 腳本裡是 `$need = $recSize - $free + 32MB`。
+
+### 🔴 `reagentc /enable` 會優先抓 `C:\Recovery\WindowsRE`
+
+想把 WinRE 放回獨立分割，必須**先把 C: 上那份刪掉**，否則 reagentc 永遠會優先用 C: 的副本。
+而 `C:\Recovery\WindowsRE` 帶有保護性 ACL，`Remove-Item` 會被拒絕，要先接手：
+
+```powershell
+takeown /f "C:\Recovery\WindowsRE" /r /d y
+icacls "C:\Recovery\WindowsRE" /grant *S-1-5-32-544:(OI)(CI)F /t /q
+rd /s /q "C:\Recovery\WindowsRE"
+```
+
+### 🔴 `reagentc` 的輸出會消失或是亂碼
+
+把 `reagentc` 的輸出接進 PowerShell 管線有時會拿到空字串（尤其在提升權限的子行程）。
+可靠的做法是**重導向到檔案再讀**：
+
+```powershell
+cmd /c "reagentc /info > %TEMP%\re.txt 2>&1"
+Get-Content "$env:TEMP\re.txt" -Raw
+```
+
+### 🟡 縮減分割時別拿 `SizeMax` 當基準
+
+`Get-PartitionSupportedSize` 回傳的 `SizeMax` 是「這顆磁碟能擴到的最大」，
+**不是「目前的容量」**。要縮小得用目前大小去減：
+
+```powershell
+$cur = (Get-Partition -DiskNumber 0 -PartitionNumber 3).Size
+Resize-Partition -Size ($cur - 2GB)      # ✓  縮小
+Resize-Partition -Size ($sup.SizeMax - 2GB)   # ✗  反而會長大
+```
+
+### 🟡 `Get-Item` 對某些檔案會回報不存在
+
+在受過濾驅動（防毒、雲端同步）或多層掛載的環境下，`Test-Path` 說有、
+`Get-ChildItem` 也列得出來，但 `Get-Item` 卻說找不到。取得檔案大小用：
+
+```powershell
+(Get-ChildItem $dir -Filter 'winre.wim' -Force | Select-Object -First 1).Length
+```
+
+### 🟡 腳本檔的編碼
+
+Windows PowerShell 5.1 讀 `.ps1` 檔用的是**系統 ANSI 碼頁**（繁中機是 Big5/950），
+用 UTF-8（無 BOM）存的中文註解會被解讀成亂碼，導致**整支腳本語法錯誤、什麼都不做**。
+兩種解法：存成 UTF-8 with BOM，或腳本內全用 ASCII。
+
+---
+
+## 驗收清單
+
+```powershell
+reagentc /info        # Windows RE status: Enabled
+Get-Partition -DiskNumber 0 | Format-Table PartitionNumber, DriveLetter, Size, GptType
+Get-Volume | Format-Table DriveLetter, Size, SizeRemaining
+```
+
+通過標準：
+
+- [ ] `Get-Volume` 裡 **D: 不存在**
+- [ ] C: 容量 ≈ 磁碟總容量 − 200 MB 左右
+- [ ] `reagentc /info` → `Windows RE status: Enabled`
+- [ ] 復原分割上有 `\Recovery\WindowsRE\winre.wim`
+- [ ] `bcdedit /enum all` 中 `{current}` 的 `recoveryenabled = Yes`
+
+實測輸出範例：
+
+```
+Windows RE status: Enabled
+Windows RE location: \\?\GLOBALROOT\device\harddisk0\partition4\Recovery\WindowsRE
+Windows RE Version: 10.0.26100.9444
+
+Part1  (no letter)  System    0.098 GB
+Part2  (no letter)  Reserved  0.016 GB
+Part3  C:           Basic   474.795 GB
+Part4  (no letter)  Recovery    2.000 GB
+```
+
+---
+
+## 注意事項與風險
+
+- **此操作不可逆。** 分割一旦刪除，資料救不回來。動手前務必確認 D: 真的沒東西。
+- **保留一份 `winre.wim` 備份** 在 `C:\WinREBackup\` 直到確認新配置能開機進復原選單為止。
+- **OEM 廠商工具** 若依賴出廠那塊復原分割（Lenovo Vantage、Dell Recovery 等），刪除後該功能會失效。
+- **舊的 BCD 項目** 會變成指向已刪除分割的 `[unknown]` 殘留項。Windows 會忽略它，
+  但要清乾淨得用 `bcdedit /deletebase {<GUID>}`。
+- **本流程會縮減再擴充 C:**（重建復原分割時）。NTFS 可線上縮小，但若檔案碎片在磁碟尾端，
+  縮小可能失敗 —— 先跑一次「磁碟碎片整理工具」再試。
+- 合併後請**重新開機**一次確認開機選單與「重設此電腦」都正常。
+
+## 復原方式
+
+如果新配置有問題：
+
+```powershell
+# 把 WinRE 裝回 C:
+New-Item -ItemType Directory -Path C:\Recovery\WindowsRE -Force
+Copy-Item C:\WinREBackup\winre.wim C:\Recovery\WindowsRE\winre.wim -Force
+reagentc /enable
+reagentc /info      # 應顯示 Enabled
+```
+
+---
+
+## License
+
+MIT — 詳見 [LICENSE](LICENSE)。

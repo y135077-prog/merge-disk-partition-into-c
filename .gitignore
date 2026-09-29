@@ -1,0 +1,18 @@
+# Logs produced by the scripts
+*.log
+ReAgent.xml.before
+
+# OS noise
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Never commit these - they contain machine-specific identifiers
+# (partition GUIDs, BCD object IDs, volume instance IDs, host names)
+*-verify*.txt
+*-verify*.log
