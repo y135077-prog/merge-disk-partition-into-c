@@ -307,6 +307,91 @@ Assert-True ($currentId -eq $winreObj)           # → 假 PASS
   布爾結果（權限不足時 `Test-Path` 會丟出非終止錯誤，指令還會**繼續往下跑**並印出
   「does not exist (good)」這種完全相反的結論）
 
+### 🔴 WinRE 的語言不會跟著系統語言走，重建也沒有用
+
+日本／韓國進口的機器，WinRE 選單常常是原文（日本語），就算系統本身已經改成繁中。
+直覺的做法是去改登錄檔語言、再 `reagentc /disable` + `/enable` 重建 ——
+**沒有用，重建出來還是一模一樣的日文，大小都不差一個位元組。**
+
+原因：`reagentc /enable` 是從 `C:\Windows\WinSxS` 裡的 **WinPE 資源**組出 wim 的，
+而那些資源來自**基底 OS 映像**。後來裝的 `zh-TW` 語言套件只含「桌面用戶端」的
+MUI 資源，**不含 WinPE（開機復原環境）那部分**。沒有素材就組不出中文。
+
+診斷法 —— 掛載 wim 數檔案數量，**完整的語言包有幾百個檔案，空殼只有個位數**：
+
+```powershell
+# 掛載復原分割（用完記得 Remove-PartitionAccessPath 清掉，否則下次掛不上）
+Add-PartitionAccessPath -DiskNumber 0 -PartitionNumber 4 -AccessPath 'R:\' -ErrorAction Stop
+
+# 掛載 wim（唯讀）與數各語言的 MUI 檔案
+New-Item -ItemType Directory -Path C:\wim -Force
+dism /Mount-Wim /WimFile:R:\Recovery\WindowsRE\winre.wim /MountDir:C:\wim /Index:1 /ReadOnly
+
+'zh-TW','zh-HK','zh-CN','ja-JP','en-US' | ForEach-Object {
+    $n = @(Get-ChildItem "C:\wim\Windows\System32\$_" -File -EA SilentlyContinue).Count
+    '{0,-8} {1,5} files' -f $_, $n
+}
+
+dism /Unmount-Wim /MountDir:C:\wim /Discard
+```
+
+日本進口機的典型輸出：
+
+```
+zh-TW          7   ← 只有空殼，沒有資源
+zh-HK          0
+zh-CN          7
+ja-JP        460   ← 完整語言包
+en-US        129   ← 中性基底
+```
+
+也可以直接看映像裡宣告了哪些 WinPE 語言套件，會發現**全部**是 `~amd64~ja-JP~`：
+
+```powershell
+dism /Get-Packages /Image:C:\wim | Select-String 'WinPE'
+```
+
+**唯一的解法是換掉基底映像**（例如用同語言的安裝映像做「保留個人檔案與應用程式」
+的就地升級，讓 `WinSxS` 換成該語言）。Windows 內建工具改不了。
+換不到相應語言的安裝媒體時怎麼辦，見下一則。
+
+### 🔴 二手工作站：Pro for Workstations 沒有公開 ISO，重灌會變未啟用
+
+HP Z、Dell Precision 這類工作站出廠就是 **Windows 11 Pro for Workstations**。
+這個版本**不在**微軟公開下載頁（`microsoft.com/software-download/windows11`）
+提供的清單裡 —— 那裡只有 Home / Home N / Home Single Language / Education / Pro / Pro N。
+Pro for Workstations 只透過大量授權（VLSC、Visual Studio 訂閱）或購買零售金鑰取得。
+
+麻煩在於：**韌體金鑰對應的是工作站版，不是 Pro。**
+
+| 重灌用的 ISO | 結果 |
+|---|---|
+| Pro | 裝得起、開得了機，但**啟用不了** → 浮水印、桌面背景與佈景主題被鎖、部分設定失效。而手上的金鑰是工作站版的，補不了 Pro |
+| Pro for Workstations | 自動啟用，但下不到 |
+
+順帶一提，這個版本對多數工作站機是**純浪費**：它比 Pro 多出的是 4 CPU 插槽、
+6 TB 記憶體、ReFS、SMB Direct + RDMA、RDUX 遠端桌面、本機管理員 Bypass PBLA、
+程式碼完整性原則。單插槽、幾十 GB 記憶體的機器完全用不到這些。
+
+**動手重灌前先確認版本與韌體金鑰：**
+
+```powershell
+Get-CimInstance SoftwareLicensingService |
+    Select-Object OA3xOriginalProductKeyDescription, OA3xOriginalProductKey
+```
+
+輸出 `ProfessionalWorkstation` → 用公開的 ISO 重灌完會是未啟用狀態。
+要重灌回工作站版，只能買一把 Pro for Workstations 零售金鑰（裝 Pro 媒體後
+「變更產品金鑰」原地升版，不必重灌第二次），或透過組織的大量授權取得媒體。
+
+順手把這些憑證存檔，因為主機板一換韌體金鑰就沒了（也別把它 commit 進公開的 repo）：
+
+```powershell
+Get-CimInstance SoftwareLicensingProduct |
+    Where-Object { $_.LicenseStatus -eq 1 -and $_.PartialProductKey } |
+    Select-Object Name, Channel, PartialProductKey, ExpirationDate
+```
+
 ---
 
 ## 驗收清單
