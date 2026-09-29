@@ -158,20 +158,36 @@ GPT 會在磁碟最後保留 1 MB 給次要分割表。所以「切出剛好 2 G
 
 **解法：多留 32 MB 餘裕。** 腳本裡是 `$need = $recSize - $free + 32MB`。
 
-### 🔴 復原分割別開太小 — 壓縮後 vs 展開後差 4 倍
+### 🔴 復原分割要按「壓縮後」大小算，不是「展開後」
 
-`winre.wim` 檔案本身約 989 MB，但**展開後是 3.87 GB**（WinRE 裡面塞了完整的復原堆疊）。
-2 GB 分割剛好塞得下壓縮檔，但沒有餘裕跑 `reagentc /enable` 的解壓與寫入。
-建議至少給 **3 GB**，寬裕一點給 4 GB。
+`dism /Get-WimInfo` 會印兩個容易誤導的數字：
+
+```
+Size : 3,873,560,076 bytes        ← 展開後（RAM 占用），不是分割需要的空間
+```
+
+`winre.wim` **檔案本身**約 989 MB，開機時才解壓到記憶體。
+分割要能放的是那個 **989 MB 的壓縮檔**，不是 3.87 GB。
+（本機出廠配置就只有 1 GB 的復原分割，卻能正常運作好幾年，就是證明。）
+
+所以分割容量至少要比 **wim 檔案大小 × 1.25**（留給 NTFS metadata 與
+`reagentc /enable` 重新寫入的餘裕）。本專案的 2 GB 分割 vs 989 MB wim 有 52% 頭裕，很充裕。
+真正吃掉 3.87 GB 的是**記憶體**，不是磁碟 —— 這也是為什麼 8 GB 實體記憶體的機器
+跑 WinRE 沒問題。
 
 驗證 wim 完整性（確認不是空殼或損毀）：
 
 ```powershell
 # 先暫時掛載復原分割
-Add-PartitionAccessPath -DiskNumber 0 -PartitionNumber 4 -AccessPath 'R:\'
+Add-PartitionAccessPath -DiskNumber 0 -PartitionNumber 4 -AccessPath 'R:\' -ErrorAction Stop
 dism /Get-WimInfo /WimFile:R:\Recovery\WindowsRE\winre.wim
-# 應看到：Microsoft Windows Recovery Environment (amd64) / 目錄數 / Size
+# 應看到：Microsoft Windows Recovery Environment (amd64) / Index : 1 / Size : 3,873,560,076
 ```
+
+> ⚠️ `Add-PartitionAccessPath` **成功時沒有任何輸出**，所以不能拿它的回傳值判斷成功與否。
+> 而且它是**持久**掛載點 —— 沒用 `Remove-PartitionAccessPath` 清掉的話，會永久留在
+> `mountvol` / `Get-PSDrive`，而且**同一個磁碟區只能掛在一個路徑**，之後再掛就會失敗。
+> 一次沒掛掉，下次執行就會出現莫名其妙的 SKIP。
 
 ### 🔴 `reagentc /enable` 會優先抓 `C:\Recovery\WindowsRE`
 

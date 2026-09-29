@@ -151,8 +151,15 @@ function With-MountedPartition([int]$PartitionNumber, [scriptblock]$Action) {
         return $res
     }
     $path = "${letter}:\"
-    if (-not (Add-PartitionAccessPath -DiskNumber $DiskNumber -PartitionNumber $PartitionNumber -AccessPath $path -EA SilentlyContinue)) {
-        $res.Reason = ('could not mount partition ' + $PartitionNumber)
+
+    # Add-PartitionAccessPath emits NO output on success, so its return value cannot
+    # be used as a success test - "-not (Add-PartitionAccessPath ...)" is TRUE even
+    # when the mount worked. Test for a terminating error instead.
+    try {
+        Add-PartitionAccessPath -DiskNumber $DiskNumber -PartitionNumber $PartitionNumber -AccessPath $path -ErrorAction Stop
+    } catch {
+        $res.Reason = ('could not mount partition ' + $PartitionNumber + ' at ' + $path + ': ' + $_.Exception.Message)
+        $res.Reason += '  (a volume can only be mounted at one path - check mountvol for a stale mount point)'
         return $res
     }
 
@@ -310,12 +317,16 @@ if (-not $script:IsAdmin) {
                     'boot manager path points at the EFI system partition'
 
         # Walk the object list once, tracking which identifier each line belongs to.
+        # NOTE: the identifier pattern must accept aliases such as {current} as well
+        # as GUIDs. A GUID-only pattern like \{[0-9a-f-]+\} silently fails on
+        # "identifier {current}" because "current" is not hex, and then every
+        # following property gets attributed to the previous object.
         $all = cmd /c 'bcdedit /enum all' 2>&1
         $bufId = $null
         $bufHasUnknown = $false
         $orphanCount = 0
         foreach ($line in $all) {
-            if ($line -match '^\s*identifier\s+(\{[0-9a-fA-F-]+\})') {
+            if ($line -match '^\s*identifier\s+(\{[^{}]+\})') {
                 if ($bufHasUnknown) {
                     W ('  ORPHAN: ' + $bufId + ' -> ramdisk points at [unknown]')
                     $orphanCount++
@@ -324,7 +335,7 @@ if (-not $script:IsAdmin) {
                 $bufHasUnknown = $false
             } else {
                 if ($line -match '^\s*description\s+Windows Recovery Environment') { $winreObj = $bufId }
-                if ($line -match '^\s*recoverysequence\s+(\{[0-9a-fA-F-]+\})' -and $bufId -eq '{current}') { $currentId = $Matches[1] }
+                if ($line -match '^\s*recoverysequence\s+(\{[^{}]+\})' -and $bufId -eq '{current}') { $currentId = $Matches[1] }
                 if ($line -match '\[unknown\]') { $bufHasUnknown = $true }
             }
         }
@@ -402,22 +413,32 @@ if (-not $wim.Mounted) {
         'missing' { Assert-True $false 'winre.wim is present on the recovery partition' 'not found under \Recovery\WindowsRE\' }
         'denied'  { Assert-Skip 'winre.wim is present on the recovery partition' 'access denied while reading the recovery partition' }
         default {
-            W ('  winre.wim  {0:N0} bytes ({1:N2} GB)' -f $wim.Value.Size, ($wim.Value.Size / 1GB))
+            W ('  winre.wim  {0:N0} bytes ({1:N2} GB) on disk' -f $wim.Value.Size, ($wim.Value.Size / 1GB))
             Assert-True ($wim.Value.Size -gt 0) 'winre.wim is present on the recovery partition'
             W ('  ' + $wim.Value.Info)
             $infoOk = $wim.Value.Info -match 'Windows Recovery Environment'
             Assert-True $infoOk 'DISM can read the wim and it is a Windows Recovery Environment image'
-            # The compressed file is far smaller than the uncompressed payload; sizing
-            # the recovery partition off the file size alone is a classic mistake.
-            if ($wim.Value.Info -match 'Size:\s*([0-9,]+)') {
+
+            # DISM prints "Size : N bytes" (with a space before the colon).
+            if ($wim.Value.Info -match 'Size\s*:\s*([0-9,]+)') {
                 $uncompressed = [int64](($Matches[1]) -replace '[^0-9]', '')
                 W ('  uncompressed payload: {0:N0} bytes ({1:N2} GB)' -f $uncompressed, ($uncompressed / 1GB))
-                $rec = Get-Partition -DiskNumber $DiskNumber -PartitionNumber $RecoveryPartitionNumber -EA SilentlyContinue
-                if ($rec) {
-                    Assert-True ($rec.Size -ge $uncompressed) `
-                                'recovery partition is large enough for the uncompressed image' `
-                                ('partition {0:N2} GB < image {1:N2} GB' -f ($rec.Size/1GB), ($uncompressed/1GB))
-                }
+                W '  Note: the uncompressed size is the RAM footprint at boot time, NOT the'
+                W '  space the partition needs. The wim stays compressed on disk and is'
+                W '  expanded into memory. Size the partition from the FILE size.'
+            }
+
+            $rec = Get-Partition -DiskNumber $DiskNumber -PartitionNumber $RecoveryPartitionNumber -EA SilentlyContinue
+            if ($rec) {
+                $used = $wim.Value.Size
+                $freePct = [int](100 * ($rec.Size - $used) / $rec.Size)
+                W ('  recovery partition: {0:N2} GB total, {1:N2} GB free after the wim ({2}% headroom)' -f `
+                    ($rec.Size / 1GB), (($rec.Size - $used) / 1GB), $freePct)
+                # The wim must fit, with room for NTFS metadata and for reagentc /enable
+                # to rewrite it. 25% headroom is a reasonable floor.
+                Assert-True ($rec.Size -ge ($used * 1.25)) `
+                            'recovery partition is big enough for the wim plus reagentc rewrite headroom' `
+                            ('partition {0:N2} GB vs wim {1:N2} GB' -f ($rec.Size/1GB), ($used/1GB))
             }
         }
     }
