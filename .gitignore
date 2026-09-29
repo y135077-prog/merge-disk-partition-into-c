@@ -16,3 +16,7 @@ desktop.ini
 # (partition GUIDs, BCD object IDs, volume instance IDs, host names)
 *-verify*.txt
 *-verify*.log
+verify-report.txt
+preboot-check.txt
+bcd-probe.txt
+cleanup-orphan-bcd.txt

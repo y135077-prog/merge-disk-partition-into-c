@@ -47,9 +47,18 @@
 
 # 3.（選用）重建復原分割，並把 WinRE 移回去
 .\scripts\02-rebuild-winre.ps1
+
+# 4. 驗收（唯讀，不會改動任何東西）
+.\scripts\03-verify.ps1
 ```
 
-兩個腳本都會把完整過程寫進日誌，並在**每個危險步驟前先驗證**；失敗時會停在安全的狀態，
+| 腳本 | 動作 | 會動到資料嗎 |
+|---|---|---|
+| `01-merge-partition-into-c.ps1` | 備份 WinRE → 停用 → 刪除復原分割與目標分割 → 擴充 C: | **會，不可逆** |
+| `02-rebuild-winre.ps1` | 縮小 C: → 建復原分割 → 放回 wim → 重新啟用 WinRE | **會**，但失敗會自動回退到 C: |
+| `03-verify.ps1` | 讀取分割表 / BCD / reagentc / DISM，產出 PASS-FAIL 報告 | 否，唯讀 |
+
+前兩支都會把完整過程寫進日誌，並在**每個危險步驟前先驗證**；失敗時會停在安全的狀態，
 不會讓系統處於「WinRE 壞掉 + 分割已刪」的中間點。
 
 ---
@@ -128,6 +137,21 @@ GPT 會在磁碟最後保留 1 MB 給次要分割表。所以「切出剛好 2 G
 
 **解法：多留 32 MB 餘裕。** 腳本裡是 `$need = $recSize - $free + 32MB`。
 
+### 🔴 復原分割別開太小 — 壓縮後 vs 展開後差 4 倍
+
+`winre.wim` 檔案本身約 989 MB，但**展開後是 3.87 GB**（WinRE 裡面塞了完整的復原堆疊）。
+2 GB 分割剛好塞得下壓縮檔，但沒有餘裕跑 `reagentc /enable` 的解壓與寫入。
+建議至少給 **3 GB**，寬裕一點給 4 GB。
+
+驗證 wim 完整性（確認不是空殼或損毀）：
+
+```powershell
+# 先暫時掛載復原分割
+Add-PartitionAccessPath -DiskNumber 0 -PartitionNumber 4 -AccessPath 'R:\'
+dism /Get-WimInfo /WimFile:R:\Recovery\WindowsRE\winre.wim
+# 應看到：Microsoft Windows Recovery Environment (amd64) / 目錄數 / Size
+```
+
 ### 🔴 `reagentc /enable` 會優先抓 `C:\Recovery\WindowsRE`
 
 想把 WinRE 放回獨立分割，必須**先把 C: 上那份刪掉**，否則 reagentc 永遠會優先用 C: 的副本。
@@ -179,19 +203,62 @@ Windows PowerShell 5.1 讀 `.ps1` 檔用的是**系統 ANSI 碼頁**（繁中機
 
 ## 驗收清單
 
+最快的做法是跑驗證腳本（**唯讀**，會產出 `verify-report.txt` 並列出每項檢查的 PASS/FAIL）：
+
+```powershell
+.\scripts\03-verify.ps1
+```
+
+它會檢查：分割表（EFI / MSR / C: / 復原分割的 GPT type）、D: 是否消失、
+`reagentc /info`、BCD 的 `recoveryenabled` 與 `recoverysequence`、WinRE 物件的
+`ramdisk` 是否解析到真實磁碟區、EFI 開機檔是否存在、wim 映像完整性，
+以及是否還有殘留的 `C:\Recovery\WindowsRE` 或指向 `D:` 的登錄檔／環境變數。
+
+要手動查的話：
+
 ```powershell
 reagentc /info        # Windows RE status: Enabled
 Get-Partition -DiskNumber 0 | Format-Table PartitionNumber, DriveLetter, Size, GptType
 Get-Volume | Format-Table DriveLetter, Size, SizeRemaining
+bcdedit /enum all | findstr /i unknown recoveryenabled recoverysequence
 ```
 
 通過標準：
 
 - [ ] `Get-Volume` 裡 **D: 不存在**
-- [ ] C: 容量 ≈ 磁碟總容量 − 200 MB 左右
-- [ ] `reagentc /info` → `Windows RE status: Enabled`
-- [ ] 復原分割上有 `\Recovery\WindowsRE\winre.wim`
+- [ ] C: 容量 ≈ 磁碟總容量 − 復原分割大小
+- [ ] `reagentc /info` → `Windows RE status: Enabled`，且位置指向復原分割
+      （`\\?\GLOBALROOT\device\harddisk0\partition4\Recovery\WindowsRE`）
+- [ ] 復原分割上有 `\Recovery\WindowsRE\winre.wim`，且 `dism /Get-WimInfo` 讀得出來
 - [ ] `bcdedit /enum all` 中 `{current}` 的 `recoveryenabled = Yes`
+- [ ] `bcdedit /enum all` 中**沒有任何 `[unknown]` 殘留**（舊分割的孤兒項）
+- [ ] WinRE 的 BCD 物件 `ramdisk=` 指向真實磁碟區而非 `[unknown]`：
+
+```
+identifier              {71d9d4d1-bba3-11f1-9b01-18473d2be80c}
+device                  ramdisk=[\Device\HarddiskVolume6]\Recovery\WindowsRE\Winre.wim,{71d9d4d2-...}
+osdevice                ramdisk=[\Device\HarddiskVolume6]\Recovery\WindowsRE\Winre.wim,{71d9d4d2-...}
+winpe                   Yes
+```
+
+> `[\Device\HarddiskVolume6]` 這個編號不重要，**重要的是它不是 `[unknown]`** ——
+> 代表開機管理程式真的解析到了 WinRE 所在的磁碟區。
+
+### 重開機後的實機驗證
+
+非侵入性檢查通過後，**一定要實際重開機一次**：
+
+| 測試 | 做法 | 通過標準 |
+|---|---|---|
+| 正常開機 | 直接重開機 | 進到登入畫面、帳號可登入、檔案總管看到 474.8 GB |
+| 進修復選單 | `Win + Shift + 重新開機` → 使用裝置 → 疑難排解 | 藍底 WinRE 選單出來 |
+| 進階選項 | 疑難排解 → 進階選項 | 看到啟動修復 / 系統還原 / 安全模式 / 命令提示字元 / UEFI 韌體設定 |
+| **唯讀驗證（建議做）** | 在 WinRE 開「命令提示字元」跑 `diskpart` → `list disk` → `list partition` | 看到 4 個分割（100M / 16M / 474.8G / 2.0G） |
+| 重設此電腦 | 回到 Windows，設定 → 系統 → 復原 | 「重設此電腦」可選（**不要真的按下去**） |
+| 自動修復（選用） | 開機中連續 3 次長按電源鍵強制關機，第 4 次開機 | 出現「自動修復」並載入 WinRE |
+
+最後一項會真的讓 Windows 判定開機失敗，需要跑一次「啟動修復」或進安全模式才能回來。
+前五項都通過就可以跳過。
 
 實測輸出範例：
 
@@ -213,8 +280,15 @@ Part4  (no letter)  Recovery    2.000 GB
 - **此操作不可逆。** 分割一旦刪除，資料救不回來。動手前務必確認 D: 真的沒東西。
 - **保留一份 `winre.wim` 備份** 在 `C:\WinREBackup\` 直到確認新配置能開機進復原選單為止。
 - **OEM 廠商工具** 若依賴出廠那塊復原分割（Lenovo Vantage、Dell Recovery 等），刪除後該功能會失效。
-- **舊的 BCD 項目** 會變成指向已刪除分割的 `[unknown]` 殘留項。Windows 會忽略它，
-  但要清乾淨得用 `bcdedit /deletebase {<GUID>}`。
+- **舊的 BCD 項目** 會變成指向已刪除分割的 `[unknown]` 殘留項。只要沒被 `displayorder`、
+  `toolsdisplayorder`、`recoverysequence`、`default`、`resumeobject` 引用，它就不會出現在
+  開機選單，可安全忽略。要清掉的話注意指令是 **`bcdedit /delete {<GUID>}`**
+  （不是 `/deletebase`，那個子命令不存在）：
+  ```powershell
+  bcdedit /export C:\BCD-backup.bcd      # 先備份
+  bcdedit /delete {<GUID>}
+  bcdedit /enum all | findstr unknown    # 應無輸出
+  ```
 - **本流程會縮減再擴充 C:**（重建復原分割時）。NTFS 可線上縮小，但若檔案碎片在磁碟尾端，
   縮小可能失敗 —— 先跑一次「磁碟碎片整理工具」再試。
 - 合併後請**重新開機**一次確認開機選單與「重設此電腦」都正常。
