@@ -40,16 +40,37 @@
 
 ## 快速開始
 
+> ⚠️ **必須用 `powershell -ExecutionPolicy Bypass -File` 執行。**
+> Windows PowerShell 預設執行原則是 `Restricted`，直接打 `.\scripts\xx.ps1`
+> 會被擋下並報 `PSSecurityException`。`-ExecutionPolicy Bypass` 只影響該次呼叫，
+> 不會修改系統設定（比 `Set-ExecutionPolicy Unrestricted` 安全）。
+
 ```powershell
 # 1. 以系統管理員身分開啟 PowerShell
+cd C:\Users\...\merge-disk-partition-into-c
+
 # 2. 合併（備份 WinRE → 刪 D: 和復原分割 → 擴充 C:）
-.\scripts\01-merge-partition-into-c.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\01-merge-partition-into-c.ps1
 
 # 3.（選用）重建復原分割，並把 WinRE 移回去
-.\scripts\02-rebuild-winre.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\02-rebuild-winre.ps1
 
 # 4. 驗收（唯讀，不會改動任何東西）
+powershell -ExecutionPolicy Bypass -File .\scripts\03-verify.ps1
+```
+
+若想在目前這個視窗直接跑（不另開子行程），先放寬當前工作階段：
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\scripts\03-verify.ps1
+```
+
+`03-verify.ps1` 支援參數：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\03-verify.ps1 `
+    -DiskNumber 0 -RecoveryPartitionNumber 4 -ReportPath D:\verify.txt
 ```
 
 | 腳本 | 動作 | 會動到資料嗎 |
@@ -198,6 +219,34 @@ Resize-Partition -Size ($sup.SizeMax - 2GB)   # ✗  反而會長大
 Windows PowerShell 5.1 讀 `.ps1` 檔用的是**系統 ANSI 碼頁**（繁中機是 Big5/950），
 用 UTF-8（無 BOM）存的中文註解會被解讀成亂碼，導致**整支腳本語法錯誤、什麼都不做**。
 兩種解法：存成 UTF-8 with BOM，或腳本內全用 ASCII。
+本 repo 的腳本全部維持 **ASCII only**（中文說明放在 README）。
+
+### 🟡 直接打 `.\xx.ps1` 會被執行原則擋下
+
+```
+.\scripts\03-verify.ps1 : 因為這個系統上已停用指令碼執行，所以無法載入 ... 檔案
+    + FullyQualifiedErrorId : UnauthorizedAccess
+```
+
+Windows PowerShell 的預設執行原則是 `Restricted`，任何下載或複製來的 `.ps1`
+都會被拒絕執行。**不要**為了省事去 `Set-ExecutionPolicy Unrestricted`（全域放寬），
+改用單次呼叫：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\03-verify.ps1
+```
+
+或只放寬目前這個工作階段（關掉視窗就失效）：
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+
+若要永久信任這個路徑，用 `Unblock-File` 解除檔案上的「從網路下載」封鎖標記：
+
+```powershell
+Get-ChildItem .\scripts\*.ps1 | Unblock-File
+```
 
 ---
 

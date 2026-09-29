@@ -23,8 +23,17 @@
     Where to write the report. Default: <script dir>\..\verify-report.txt
 
 .EXAMPLE
+    Run from an elevated PowerShell. The default execution policy is "Restricted",
+    so a plain ".\03-verify.ps1" will be rejected - the -ExecutionPolicy Bypass
+    below only applies to that one call and does not change machine settings.
+
     powershell -ExecutionPolicy Bypass -File .\03-verify.ps1
+
+.EXAMPLE
     powershell -ExecutionPolicy Bypass -File .\03-verify.ps1 -DiskNumber 0 -RecoveryPartitionNumber 4
+
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File .\03-verify.ps1 -ReportPath D:\verify.txt
 #>
 
 [CmdletBinding()]

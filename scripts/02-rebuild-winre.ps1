@@ -23,9 +23,17 @@
 
     NOTE ON ENCODING: ASCII only, on purpose. See 01-merge-partition-into-c.ps1.
 
+NOTE ON EXECUTION POLICY: the Windows PowerShell default is "Restricted", so a
+    plain ".\02-rebuild-winre.ps1" is rejected with PSSecurityException.
+    Use the -ExecutionPolicy Bypass form below (applies to that one call only, it
+    does not change any machine setting), or relax the current session first with
+    "Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass".
+
 .EXAMPLE
-    .\02-rebuild-winre.ps1
-    .\02-rebuild-winre.ps1 -DiskNumber 0 -RecoverySizeGB 2
+    powershell -ExecutionPolicy Bypass -File .\02-rebuild-winre.ps1
+
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File .\02-rebuild-winre.ps1 -DiskNumber 0 -RecoverySizeGB 2
 #>
 
 [CmdletBinding()]

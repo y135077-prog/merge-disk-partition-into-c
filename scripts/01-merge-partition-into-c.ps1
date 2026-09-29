@@ -24,9 +24,17 @@
     comments get mangled into syntax errors and the script silently does
     nothing. If you want non-ASCII comments, save the file as "UTF-8 with BOM".
 
+NOTE ON EXECUTION POLICY: the Windows PowerShell default is "Restricted", so a
+    plain ".\01-merge-partition-into-c.ps1" is rejected with PSSecurityException.
+    Use the -ExecutionPolicy Bypass form below (applies to that one call only, it
+    does not change any machine setting), or relax the current session first with
+    "Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass".
+
 .EXAMPLE
-    .\01-merge-partition-into-c.ps1
-    .\01-merge-partition-into-c.ps1 -DiskNumber 0 -TargetLetter 'D:'
+    powershell -ExecutionPolicy Bypass -File .\01-merge-partition-into-c.ps1
+
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File .\01-merge-partition-into-c.ps1 -DiskNumber 0 -TargetLetter 'D:'
 #>
 
 [CmdletBinding()]
